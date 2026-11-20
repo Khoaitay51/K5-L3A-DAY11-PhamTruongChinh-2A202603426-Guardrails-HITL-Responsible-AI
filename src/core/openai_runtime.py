@@ -8,6 +8,7 @@ Gemini Red Team dùng Google ADK trong agents/*.py — không đi qua file này.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -61,15 +62,34 @@ class OpenAIRunner:
         if block_msg is not None:
             return block_msg
 
-        client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": agent.instruction},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.temperature,
+        from openai import (
+            APIConnectionError,
+            APITimeoutError,
+            InternalServerError,
+            RateLimitError,
         )
+
+        client = self._client()
+        last_err: Exception | None = None
+        for attempt in range(5):
+            try:
+                completion = client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": agent.instruction},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=self.temperature,
+                )
+                break
+            except (RateLimitError, InternalServerError, APITimeoutError, APIConnectionError) as err:
+                last_err = err
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(2 ** (attempt + 1))
+        else:
+            assert last_err is not None
+            raise last_err
         text = (completion.choices[0].message.content or "").strip()
 
         for hook in self.output_hooks:
